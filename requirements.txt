@@ -1,0 +1,19 @@
+# requirements.txt — Aktien Analyse Pro v8
+streamlit>=1.32.0
+yfinance>=0.2.40
+pandas>=2.0.0
+pandas-ta>=0.3.14b
+numpy>=1.24.0
+plotly>=5.18.0
+requests>=2.31.0
+nltk>=3.8.0
+certifi>=2024.0.0
+urllib3>=2.0.0
+
+# Phase 3: Backtesting (vektorisiert, kein separates Paket nötig)
+# vectorbt kann optional installiert werden für erweiterte Analysen:
+# vectorbt>=0.24.0  # pip install vectorbt
+
+# Phase 4: PDF-Export
+fpdf2>=2.7.0
+kaleido>=0.2.1
