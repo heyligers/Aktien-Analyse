@@ -7,6 +7,8 @@ import pandas as pd
 import numpy as np
 import requests
 import streamlit as st
+import types
+import urllib.parse
 from datetime import datetime, timedelta
 
 from modules.utils import fmt_number, logger, safe_get
@@ -322,37 +324,114 @@ def calculate_correlation_matrix(tickers: list) -> pd.DataFrame:
     return ret_df.corr().round(3)
 
 
-@st.cache_data(ttl=600, show_spinner="Heatmap wird geladen…")
-def get_heatmap_data(universe_name: str, index_universes: dict) -> list:
-    tickers = index_universes.get(universe_name, [])
-    results = []
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+@st.cache_data(ttl=3600, show_spinner=False)
+def _get_bulk_prices(tickers: tuple) -> pd.DataFrame:
+    """Interner Cache für Bulk-Preisdaten."""
+    if not tickers:
+        return pd.DataFrame()
+    try:
+        # Bei vielen Tickern kann yfinance manchmal hängen, wir begrenzen die Liste zur Sicherheit
+        df = yf.download(list(tickers), period="7d", interval="1d", 
+                         group_by="ticker", auto_adjust=True, progress=False)
+        return df
+    except Exception as e:
+        logger.error(f"Bulk-Download fehlgeschlagen: {e}")
+        return pd.DataFrame()
 
-    def _fetch(sym):
+@st.cache_data(ttl=86400, show_spinner=False)
+def _get_ticker_meta_heatmap_cached(sym: str) -> dict | None:
+    """Extrem langlebiger Cache für Sektor/Name (ändert sich selten)."""
+    try:
+        t = yf.Ticker(sym)
+        info = t.info
+        return {
+            "name": info.get("shortName", sym)[:15],
+            "sector": info.get("sector", "Sonstiges"),
+            "mcap": info.get("marketCap", 0)
+        }
+    except Exception:
+        return None
+
+def get_heatmap_data(universe_name: str, tickers: list, progress_cb=None) -> list:
+    """
+    Haupt-Koordinator (NICHT GECACHED), damit progress_cb sicher aufgerufen werden kann.
+    Nutzt interne Caches für Preise und Metadaten.
+    """
+    if not tickers:
+        return []
+        
+    if progress_cb: progress_cb(5, "Bulk-Kursdaten werden geladen...")
+    df_bulk = _get_bulk_prices(tuple(tickers)) # Tuple für Hash-Fähigkeit
+    
+    if df_bulk.empty:
+        # Fallback: Wenn Bulk-Download komplett fehlschlägt, trotzdem Einzelabrufe versuchen
+        logger.warning("Bulk-Download leer — versuche Einzelabrufe für Heatmap")
+        if progress_cb: progress_cb(10, "Bulk fehlgeschlagen, lade einzeln...")
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    results = []
+    
+    def _process_single(sym):
         try:
-            t = yf.Ticker(sym)
-            info = t.info
-            fi = t.fast_info
-            price = getattr(fi, "last_price", None)
-            prev = info.get("previousClose") or info.get("regularMarketPreviousClose")
-            mcap = info.get("marketCap", 1e9)
-            name = info.get("shortName", sym)[:20]
-            sector = info.get("sector", "Sonstiges")
-            if price and prev and prev > 0:
-                change = (price / prev - 1) * 100
+            # 1. Preisdaten aus Bulk-DF
+            t_df = None
+            if isinstance(df_bulk.columns, pd.MultiIndex):
+                if sym in df_bulk.columns.levels[0]:
+                    t_df = df_bulk[sym]
             else:
-                change = 0
-            return {"ticker": sym, "name": name, "sector": sector,
-                    "change": round(change, 2), "mcap": mcap or 1e9, "price": price}
-        except Exception:
+                # Falls nur ein Ticker angefragt wurde (selten bei Heatmap)
+                if not df_bulk.empty:
+                    t_df = df_bulk
+            
+            # FALLBACK: Falls Ticker im Bulk-Download fehlt, einzeln nachladen
+            if t_df is None or t_df["Close"].dropna().empty:
+                try:
+                    t_df = yf.download(sym, period="7d", interval="1d", 
+                                       auto_adjust=True, progress=False)
+                except Exception:
+                    return None
+            
+            close_s = t_df["Close"].ffill().dropna()
+            if len(close_s) < 2:
+                return None
+            
+            price = float(close_s.iloc[-1])
+            prev = float(close_s.iloc[-2])
+            change = (price / prev - 1) * 100
+            
+            # 2. Metadaten aus Cache (oder Fetch)
+            meta = _get_ticker_meta_heatmap_cached(sym)
+            if not meta:
+                # Letzter Versuch: Einzel-Meta-Fetch (wird im Cache für 24h gespeichert)
+                meta = {"name": sym, "sector": "Unbekannt", "mcap": 0}
+                
+            return {
+                "ticker": sym, 
+                "name": meta["name"], 
+                "sector": meta["sector"],
+                "change": round(change, 2), 
+                "mcap": meta["mcap"], 
+                "price": price
+            }
+        except Exception as e:
+            logger.debug(f"Heatmap-Einzelverarbeitung Fehler für {sym}: {e}")
             return None
 
+    total = len(tickers)
+    processed = 0
+    # Wir reduzieren max_workers etwas, um Rate-Limits bei info-Calls zu vermeiden
     with ThreadPoolExecutor(max_workers=10) as ex:
-        futures = [ex.submit(_fetch, s) for s in tickers]
+        futures = [ex.submit(_process_single, s) for s in tickers]
         for f in as_completed(futures):
-            r = f.result()
-            if r:
-                results.append(r)
+            res = f.result()
+            if res:
+                results.append(res)
+            processed += 1
+            if progress_cb and processed % 5 == 0:
+                p_val = min(15 + int((processed / total) * 85), 100)
+                progress_cb(p_val, f"Verarbeite: {processed}/{total}")
+    
+    if progress_cb: progress_cb(100, "Fertig!")
     return results
 
 
@@ -360,10 +439,10 @@ def get_heatmap_data(universe_name: str, index_universes: dict) -> list:
 def get_insider_data(ticker_sym: str) -> list:
     import re
     transactions = []
+    # OpenInsider unterstützt primär US-Aktien ohne Suffix (z.B. AAPL statt AAPL.DE)
+    ticker_clean = ticker_sym.split(".")[0].upper().strip()
     try:
-        url = (f"http://openinsider.com/screener?s={ticker_sym}&o=&pl=&ph=&ll=&lh="
-               f"&fd=90&fdr=&td=0&tdr=&feession=&ession=&xp=1&vl=&vh=&ocl=&och="
-               f"&session=&iession=1&cnt=20")
+        url = f"http://openinsider.com/screener?s={ticker_clean}&fd=90&cnt=20"
         res = safe_get(url, timeout=8)
         if res.status_code != 200:
             return transactions
@@ -371,7 +450,7 @@ def get_insider_data(ticker_sym: str) -> list:
                                 res.text, re.DOTALL)
         if not table_match:
             return transactions
-        rows = re.findall(r'<tr>(.*?)</tr>', table_match.group(1), re.DOTALL)
+        rows = re.findall(r'<tr[^>]*>(.*?)</tr>', table_match.group(1), re.DOTALL)
         for row in rows[1:21]:
             cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.DOTALL)
             if len(cells) >= 12:
@@ -398,14 +477,21 @@ def get_insider_data(ticker_sym: str) -> list:
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def get_reddit_posts(ticker_sym: str) -> list:
+def get_reddit_posts(ticker_sym: str, company_name: str = None) -> list:
     posts = []
     subreddits = ["wallstreetbets", "stocks", "investing"]
     headers = {'User-Agent': 'Mozilla/5.0 (Stock Screener Bot v1.0)'}
+    
+    # Query erweitern: Ticker oder Name
+    if company_name:
+        q = f'({ticker_sym} OR "{company_name}")'
+    else:
+        q = ticker_sym
+        
     for sub in subreddits:
         try:
             url = (f"https://www.reddit.com/r/{sub}/search.json"
-                   f"?q={ticker_sym}&sort=new&limit=5&restrict_sr=1")
+                   f"?q={urllib.parse.quote(q)}&sort=new&limit=5&restrict_sr=1")
             res = requests.get(url, headers=headers, timeout=6)
             if res.status_code != 200:
                 continue
@@ -443,20 +529,25 @@ def get_economic_calendar() -> list:
 
     events = []
     static_events = [
-        {"date": "2026-04-17", "event": "EZB Zinsentscheid", "region": "EU", "importance": "!!!"},
-        {"date": "2026-05-07", "event": "Fed Zinsentscheid", "region": "US", "importance": "!!!"},
-        {"date": "2026-06-05", "event": "EZB Zinsentscheid", "region": "EU", "importance": "!!!"},
+        {"date": "2026-04-29", "event": "Fed Zinsentscheid", "region": "US", "importance": "!!!"},
+        {"date": "2026-04-30", "event": "EZB Zinsentscheid", "region": "EU", "importance": "!!!"},
+        {"date": "2026-06-11", "event": "EZB Zinsentscheid", "region": "EU", "importance": "!!!"},
         {"date": "2026-06-17", "event": "Fed Zinsentscheid", "region": "US", "importance": "!!!"},
-        {"date": "2026-07-17", "event": "EZB Zinsentscheid", "region": "EU", "importance": "!!!"},
+        {"date": "2026-07-23", "event": "EZB Zinsentscheid", "region": "EU", "importance": "!!!"},
         {"date": "2026-07-29", "event": "Fed Zinsentscheid", "region": "US", "importance": "!!!"},
+        {"date": "2026-09-10", "event": "EZB Zinsentscheid", "region": "EU", "importance": "!!!"},
         {"date": "2026-09-16", "event": "Fed Zinsentscheid", "region": "US", "importance": "!!!"},
+        {"date": "2026-10-28", "event": "Fed Zinsentscheid", "region": "US", "importance": "!!!"},
+        {"date": "2026-10-29", "event": "EZB Zinsentscheid", "region": "EU", "importance": "!!!"},
+        {"date": "2026-12-09", "event": "Fed Zinsentscheid", "region": "US", "importance": "!!!"},
+        {"date": "2026-12-17", "event": "EZB Zinsentscheid", "region": "EU", "importance": "!!!"},
     ]
     today = datetime.today().date()
     for ev in static_events:
         d = datetime.strptime(ev["date"], "%Y-%m-%d").date()
         if d >= today - timedelta(days=14):
-            ev["days_away"] = (d - today).days
-            events.append(ev)
+            ev_copy = {**ev, "days_away": (d - today).days}
+            events.append(ev_copy)
 
     try:
         res = safe_get("https://www.ecb.europa.eu/rss/press.html", timeout=5)
@@ -478,9 +569,14 @@ def get_economic_calendar() -> list:
         pass
 
     for month_offset in range(0, 4):
-        d = today.replace(day=1) + timedelta(days=32 * month_offset)
-        d = d.replace(day=1)
-        while d.weekday() != 4:
+        # Korrekte Monatsarithmetik ohne timedelta(days=32)-Trick
+        target_month = today.month + month_offset
+        target_year = today.year + (target_month - 1) // 12
+        target_month = ((target_month - 1) % 12) + 1
+        # Ersten Tag des Zielmonats bestimmen
+        d = today.replace(year=target_year, month=target_month, day=1)
+        # Ersten Freitag des Monats finden
+        while d.weekday() != 4:  # 4 = Freitag
             d += timedelta(days=1)
         if d >= today:
             events.append({
@@ -492,3 +588,81 @@ def get_economic_calendar() -> list:
 
     events.sort(key=lambda x: x.get("date", "9999"))
     return events
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_index_ticker_data() -> list:
+    """Holt Live-Kursdaten für den Home-Ticker (Indizes, Forex, Rohstoffe, Crypto).
+    Nutzt Tagesdaten, da diese bei Yahoo Finance untertägig in Echtzeit aktualisiert werden,
+    während der vorherige Schlusskurs korrekt erhalten bleibt."""
+    symbols = {
+        "^GDAXI": "DAX", "^GSPC": "S&P 500", "^NDX": "Nasdaq 100", "^DJI": "Dow Jones",
+        "^FTSE": "FTSE 100", "^FCHI": "CAC 40", "^N225": "Nikkei 225",
+        "EURUSD=X": "EUR/USD", "JPY=X": "USD/JPY", "GBPUSD=X": "GBP/USD",
+        "GC=F": "Gold", "SI=F": "Silber", "BZ=F": "Brent Öl", "BTC-USD": "Bitcoin"
+    }
+    results = []
+    try:
+        # 5-Tage-Tagesdaten für den korrekten Schlusskurs des Vortags (prev_price)
+        df_1d = yf.download(
+            list(symbols.keys()), period="5d", interval="1d",
+            group_by="ticker", auto_adjust=True, progress=False
+        )
+        
+        # 1-Minuten-Daten für den echten Live-Kurs (last_price)
+        df_1m = yf.download(
+            list(symbols.keys()), period="1d", interval="1m",
+            group_by="ticker", auto_adjust=True, progress=False
+        )
+
+        for sym, name in symbols.items():
+            try:
+                last_price = None
+                prev_price = None
+                last_price_fallback = None
+
+                # 1. Vortagesschluss aus Tagesdaten (1d) ermitteln
+                if not df_1d.empty:
+                    if isinstance(df_1d.columns, pd.MultiIndex):
+                        if sym in df_1d.columns.get_level_values(0):
+                            s1d = df_1d[sym]["Close"].squeeze().dropna()
+                            if len(s1d) >= 2:
+                                prev_price = float(s1d.iloc[-2])
+                                last_price_fallback = float(s1d.iloc[-1])
+                    else:
+                        s1d = df_1d["Close"].squeeze().dropna()
+                        if len(s1d) >= 2:
+                            prev_price = float(s1d.iloc[-2])
+                            last_price_fallback = float(s1d.iloc[-1])
+
+                # 2. Echten Live-Kurs aus Minuten-Daten (1m) ermitteln
+                if not df_1m.empty:
+                    if isinstance(df_1m.columns, pd.MultiIndex):
+                        if sym in df_1m.columns.get_level_values(0):
+                            s1m = df_1m[sym]["Close"].squeeze().dropna()
+                            if not s1m.empty:
+                                last_price = float(s1m.iloc[-1])
+                    else:
+                        s1m = df_1m["Close"].squeeze().dropna()
+                        if not s1m.empty:
+                            last_price = float(s1m.iloc[-1])
+
+                # Fallback, falls 1m-Daten komplett leer sind (passiert bei geschlossenen Märkten manchmal)
+                if last_price is None:
+                    last_price = last_price_fallback
+
+                if last_price is None or prev_price is None or prev_price == 0:
+                    continue
+
+                change_pct = (last_price / prev_price - 1) * 100
+                results.append({
+                    "symbol": sym,
+                    "name": name,
+                    "price": last_price,
+                    "change": change_pct
+                })
+            except Exception:
+                continue
+    except Exception as e:
+        logger.error(f"Ticker-Daten Fehler: {e}")
+    return results
