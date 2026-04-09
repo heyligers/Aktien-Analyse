@@ -17,7 +17,7 @@ try:
 except LookupError:
     nltk.download('vader_lexicon', quiet=True)
 
-st.set_page_config(page_title="Analyse · Aktien Pro v8", layout="wide", page_icon="📊")
+st.set_page_config(page_title="Analyse · Aktien Pro v8", layout="wide", page_icon="")
 
 from modules.utils import get_api_key_value
 from modules.data_api import (
@@ -37,55 +37,12 @@ from modules.ai_gemini import display_ai_news
 from modules.ui_components import (
     display_fundamentals, display_options, display_macro,
     display_comparison, display_insider, display_social_sentiment,
+    display_stock_ticker
 )
 from modules.report_generator import display_pdf_export
 
 # ── Sidebar ─────────────────────────────────────────────────────────────────
-st.sidebar.header("Einstellungen")
-
-if "jump_ticker" in st.session_state:
-    _default_input = st.session_state.pop("jump_ticker")
-else:
-    _default_input = "Apple"
-
-user_input = st.sidebar.text_input("Name oder Ticker", _default_input)
-ticker = get_ticker(user_input)
-st.sidebar.markdown(f"**Symbol:** `{ticker}`")
-
-# Watchlist-Button
-_bm = load_bookmarks()
-_is_bm = ticker in _bm
-_bm_label = "★ Aus Watchlist entfernen" if _is_bm else "☆ Zur Watchlist hinzufügen"
-if st.sidebar.button(_bm_label, key="bm_toggle"):
-    if _is_bm:
-        remove_bookmark(ticker)
-        st.toast(f"{ticker} aus Watchlist entfernt.")
-    else:
-        _info = get_ticker_info(ticker)
-        add_bookmark(ticker, _info.get("name", ticker))
-        st.toast(f"{ticker} zur Watchlist hinzugefügt.")
-    st.rerun()
-
-intervals = {"1 Stunde": "1h", "4 Stunden": "4h", "1 Tag": "1d", "1 Woche": "1wk"}
-sel_inter = st.sidebar.selectbox("Intervall", list(intervals.keys()), index=2)
-interval = intervals[sel_inter]
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("Zeitraum")
-default_end = datetime.today().date()
-if interval in ("1h", "4h"):
-    default_start = default_end - timedelta(days=59)
-    st.sidebar.caption("Stunden-Daten: max. 60 Tage verfügbar.")
-else:
-    default_start = default_end - timedelta(days=365)
-
-date_selection = st.sidebar.date_input(
-    "Start- und Enddatum", value=(default_start, default_end), max_value=default_end
-)
-if len(date_selection) == 2:
-    start_date, end_date = date_selection
-else:
-    start_date, end_date = date_selection[0], date_selection[0]
+st.sidebar.header("Optionen")
 
 _auto_key = get_api_key_value()
 news_api_key = st.sidebar.text_input(
@@ -94,30 +51,60 @@ news_api_key = st.sidebar.text_input(
 )
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("Indikatoren")
-sma_on = st.sidebar.checkbox("SMA (20/50)", value=True,
-    help="**Simple Moving Average** — Gleitender Durchschnitt.")
-ema_on = st.sidebar.checkbox("EMA (20/50)", value=False,
-    help="**Exponential Moving Average** — Gewichtet neuere Kurse stärker.")
-bb_on = st.sidebar.checkbox("Bollinger Bands", value=False)
-vwap_on = st.sidebar.checkbox("VWAP", value=False)
-cdl_on = st.sidebar.checkbox("Candlestick Patterns", value=False)
-sr_on = st.sidebar.checkbox("Support/Resistance", value=False)
-fib_on = st.sidebar.checkbox("Fibonacci Retracements", value=False)
-
-st.sidebar.markdown("**Oszillatoren**")
-rsi_on = st.sidebar.checkbox("RSI", value=False)
-macd_on = st.sidebar.checkbox("MACD", value=False)
-stoch_on = st.sidebar.checkbox("Stochastik", value=False)
-atr_on = st.sidebar.checkbox("ATR", value=False)
-obv_on = st.sidebar.checkbox("OBV", value=False)
-willr_on = st.sidebar.checkbox("Williams %R", value=False)
-ich_on = st.sidebar.checkbox("Ichimoku Cloud", value=False)
 
 display_watchlist()
 
 # ── Hauptbereich ─────────────────────────────────────────────────────────────
-st.title("📊 Analyse")
+display_stock_ticker()
+
+st.title(" Analyse")
+
+# Ticker/Suche & Zeitspanne oben
+if "jump_ticker" in st.session_state:
+    _default_input = st.session_state.pop("jump_ticker")
+else:
+    _default_input = "Apple"
+
+col_header1, col_header2, col_header3, col_header4 = st.columns([2.2, 0.8, 1.8, 0.8])
+with col_header1:
+    user_input = st.text_input("Ticker", _default_input, label_visibility="collapsed", placeholder="Name oder Ticker...")
+    ticker = get_ticker(user_input)
+
+with col_header2:
+    intervals = {"1 Min": "1m", "15 Min": "15m", "1 Std": "1h", "4 Std": "4h", "1 Tag": "1d", "1 Woche": "1wk"}
+    sel_inter = st.selectbox("Intervall", list(intervals.keys()), index=4, label_visibility="collapsed")
+    interval = intervals[sel_inter]
+
+with col_header3:
+    default_end = datetime.today().date()
+    if interval == "1m":
+        default_start = default_end - timedelta(days=6) # Max. 7 Tage für 1m
+    elif interval == "15m":
+        default_start = default_end - timedelta(days=59) # Max. 60 Tage für < 60m
+    elif interval in ("1h", "4h"):
+        default_start = default_end - timedelta(days=729) # Max. 730 Tage für 1h/4h
+    else:
+        default_start = default_end - timedelta(days=365)
+        
+    date_selection = st.date_input("Zeitraum", value=(default_start, default_end), max_value=default_end, label_visibility="collapsed")
+    if len(date_selection) == 2:
+        start_date, end_date = date_selection
+    else:
+        start_date, end_date = date_selection[0], date_selection[0]
+
+with col_header4:
+    _bm = load_bookmarks()
+    _is_bm = ticker in _bm
+    _bm_label = "★" if _is_bm else "☆"
+    if st.button(_bm_label, key="bm_toggle", use_container_width=True, help="Zur Watchlist hinzufügen/entfernen"):
+        if _is_bm:
+            remove_bookmark(ticker)
+            st.toast(f"{ticker} entfernt.")
+        else:
+            _info = get_ticker_info(ticker)
+            add_bookmark(ticker, _info.get("name", ticker))
+            st.toast(f"{ticker} hinzugefügt.")
+        st.rerun()
 col_main, col_side = st.columns([5, 3])
 
 try:
@@ -126,48 +113,72 @@ try:
     if df is None or df.empty:
         st.error(f"Keine Daten für **{ticker}** im gewählten Zeitraum.")
     else:
-        # Indikatoren berechnen
-        if sma_on:
-            df.ta.sma(length=20, append=True)
-            df.ta.sma(length=50, append=True)
-        if ema_on:
-            df.ta.ema(length=20, append=True)
-            df.ta.ema(length=50, append=True)
-        if bb_on:
-            df.ta.bbands(length=20, append=True)
-        if rsi_on:
-            df.ta.rsi(length=14, append=True)
-        if macd_on:
-            df.ta.macd(append=True)
-        if stoch_on:
-            df.ta.stoch(append=True)
-        if vwap_on:
-            typical = (df["High"] + df["Low"] + df["Close"]) / 3
-            df["VWAP"] = (df["Volume"] * typical).cumsum() / df["Volume"].cumsum()
-        if atr_on:
-            df.ta.atr(length=14, append=True)
-        if obv_on:
-            df.ta.obv(append=True)
-        if willr_on:
-            df.ta.willr(length=14, append=True)
-        if ich_on:
-            ich = df.ta.ichimoku(lookahead=False)
-            if ich is not None and len(ich) == 2:
-                span_df = ich[1] if hasattr(ich[1], 'columns') else None
-                base_df = ich[0] if hasattr(ich[0], 'columns') else None
-                if base_df is not None:
-                    for col in base_df.columns:
-                        df[col] = base_df[col]
-                if span_df is not None:
-                    for col in span_df.columns:
-                        df[col] = span_df[col]
-
-        cdl_markers = detect_candlestick_patterns(df) if cdl_on else []
-        pivot_data = calculate_pivot_points(df) if sr_on else None
-        fib_data = calculate_fibonacci(df) if fib_on else None
-        sr_fib_js = sr_fib_to_lwc_lines(pivot_data, fib_data, df) if (sr_on or fib_on) else ""
-
         with col_main:
+            # Indikatoren-Toolbar (Platzsparend mit Popover)
+            with st.popover("📊 Indikatoren & Einstellungen", use_container_width=True):
+                pop_col1, pop_col2, pop_col3 = st.columns(3)
+                with pop_col1:
+                    st.markdown("**Trend/Overlay**")
+                    sma_on = st.checkbox("SMA (20/50)", value=True)
+                    ema_on = st.checkbox("EMA (20/50)", value=False)
+                    bb_on = st.checkbox("Bollinger Bands", value=False)
+                    vwap_on = st.checkbox("VWAP", value=False)
+                with pop_col2:
+                    st.markdown("**Struktur**")
+                    cdl_on = st.checkbox("Candles (Patterns)", value=False)
+                    sr_on = st.checkbox("Support/Resistance", value=False)
+                    fib_on = st.checkbox("Fibonacci Levels", value=False)
+                    ich_on = st.checkbox("Ichimoku Cloud", value=False)
+                with pop_col3:
+                    st.markdown("**Oszillatoren**")
+                    rsi_on = st.checkbox("RSI (14)", value=False)
+                    macd_on = st.checkbox("MACD", value=False)
+                    stoch_on = st.checkbox("Stochastik", value=False)
+                    atr_on = st.checkbox("ATR", value=False)
+                    obv_on = st.checkbox("OBV", value=False)
+                    willr_on = st.checkbox("Williams %R", value=False)
+
+            # --- Indikatoren berechnen (NACH der Definition) ---
+            if sma_on:
+                df.ta.sma(length=20, append=True)
+                df.ta.sma(length=50, append=True)
+            if ema_on:
+                df.ta.ema(length=20, append=True)
+                df.ta.ema(length=50, append=True)
+            if bb_on:
+                df.ta.bbands(length=20, append=True)
+            if rsi_on:
+                df.ta.rsi(length=14, append=True)
+            if macd_on:
+                df.ta.macd(append=True)
+            if stoch_on:
+                df.ta.stoch(append=True)
+            if vwap_on:
+                typical = (df["High"] + df["Low"] + df["Close"]) / 3
+                df["VWAP"] = (df["Volume"] * typical).cumsum() / df["Volume"].cumsum()
+            if atr_on:
+                df.ta.atr(length=14, append=True)
+            if obv_on:
+                df.ta.obv(append=True)
+            if willr_on:
+                df.ta.willr(length=14, append=True)
+            if ich_on:
+                ich = df.ta.ichimoku(lookahead=False)
+                if ich is not None and len(ich) == 2:
+                    span_df = ich[1] if hasattr(ich[1], 'columns') else None
+                    base_df = ich[0] if hasattr(ich[0], 'columns') else None
+                    if base_df is not None:
+                        for col in base_df.columns:
+                            df[col] = base_df[col]
+                    if span_df is not None:
+                        for col in span_df.columns:
+                            df[col] = span_df[col]
+
+            cdl_markers = detect_candlestick_patterns(df) if cdl_on else []
+            pivot_data = calculate_pivot_points(df) if sr_on else None
+            fib_data = calculate_fibonacci(df) if fib_on else None
+            sr_fib_js = sr_fib_to_lwc_lines(pivot_data, fib_data, df) if (sr_on or fib_on) else ""
+
             chart_height = 520 + 100 + sum([
                 120 if rsi_on else 0, 120 if macd_on else 0, 120 if stoch_on else 0,
                 100 if atr_on else 0, 100 if obv_on else 0, 100 if willr_on else 0,
@@ -279,7 +290,7 @@ try:
                     if st.session_state.get(f"social_loaded_{ticker}") or \
                        st.button("Social Sentiment laden", type="primary", key="load_social"):
                         st.session_state[f"social_loaded_{ticker}"] = True
-                        display_social_sentiment(ticker, n_lang)
+                        display_social_sentiment(ticker, company_name, n_lang)
                     else:
                         st.info("Klicke zum Laden von Reddit-Sentiment.")
 
@@ -288,14 +299,32 @@ try:
         fund_data_pdf = get_fundamentals(ticker)
         ai_summary_pdf = st.session_state.get(f"ai_summary_{ticker}", "")
         bt_metrics_pdf = st.session_state.get("bt_result", {}).get("metrics") \
-            if st.session_state.get("bt_ticker") == ticker else None
+            if st.session_state.get("bt_run_ticker") == ticker else None
+
+        # Erstelle einen einfachen Plotly-Chart speziell für den PDF-Export (LWC ist nicht als Bild exportierbar)
+        import plotly.graph_objects as go
+        pdf_chart_fig = go.Figure(data=[go.Candlestick(
+            x=df.index,
+            open=df['Open'],
+            high=df['High'],
+            low=df['Low'],
+            close=df['Close'],
+            name="Preis"
+        )])
+        pdf_chart_fig.update_layout(
+            template="plotly_dark",
+            margin=dict(l=10, r=10, t=10, b=10),
+            xaxis_rangeslider_visible=False,
+            paper_bgcolor='rgba(19,23,34,1)',
+            plot_bgcolor='rgba(19,23,34,1)'
+        )
 
         display_pdf_export(
             ticker=ticker,
             company_name=company_name,
             fund_data=fund_data_pdf,
             ai_summary=ai_summary_pdf,
-            chart_fig=None,   # Plotly-Chart hier nicht verfügbar (LWC ist HTML)
+            chart_fig=pdf_chart_fig,
             bt_metrics=bt_metrics_pdf,
         )
 
