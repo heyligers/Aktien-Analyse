@@ -9,6 +9,7 @@ requests>=2.31.0
 nltk>=3.8.0
 certifi>=2024.0.0
 urllib3>=2.0.0
+lxml>=5.0.0
 
 # Phase 3: Backtesting (vektorisiert, kein separates Paket nötig)
 # vectorbt kann optional installiert werden für erweiterte Analysen:
@@ -17,3 +18,6 @@ urllib3>=2.0.0
 # Phase 4: PDF-Export
 fpdf2>=2.7.0
 kaleido>=0.2.1
+
+# Phase 5: Machine Learning
+scikit-learn>=1.3.0
