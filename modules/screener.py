@@ -3,6 +3,7 @@
 # ============================================================================
 
 import streamlit as st
+import numpy as np
 import yfinance as yf
 import pandas as pd
 import requests
@@ -10,29 +11,18 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from modules.utils import fmt_number, logger
 from modules.bookmarks import load_bookmarks
+from modules.index_utils import get_full_universe
 
 
 # ============================================================================
 # UNIVERSUM & PRESET-STRATEGIEN
 # ============================================================================
 
+# Verfügbare Index-Universen — Ticker werden dynamisch aus index_constituents.json geladen
 INDEX_UNIVERSES = {
-    "DAX 40": [
-        "ADS.DE","AIR.DE","ALV.DE","BAS.DE","BAYN.DE","BEI.DE","BMW.DE","BNR.DE",
-        "CON.DE","1COV.DE","DHER.DE","DB1.DE","DBK.DE","DHL.DE","DTE.DE","EOAN.DE",
-        "FRE.DE","FME.DE","HNR1.DE","HEI.DE","HEN3.DE","IFX.DE","MBG.DE","MRK.DE",
-        "MTX.DE","MUV2.DE","P911.DE","PAH3.DE","QIA.DE","RHM.DE","RWE.DE","SAP.DE",
-        "SHL.DE","SIE.DE","SY1.DE","VNA.DE","VOW3.DE","VW.DE","ZAL.DE","HFG.DE"
-    ],
-    "S&P 500 (Top 30)": [
-        "AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA","BRK-B","JPM","UNH",
-        "V","XOM","MA","PG","JNJ","HD","COST","ABBV","MRK","CVX",
-        "LLY","BAC","PEP","KO","AVGO","TMO","MCD","WMT","CRM","NFLX"
-    ],
-    "Nasdaq 100 (Top 20)": [
-        "AAPL","MSFT","NVDA","AMZN","META","TSLA","GOOGL","AVGO","COST","NFLX",
-        "ASML","AMD","PEP","ADBE","CSCO","INTC","TXN","QCOM","HON","INTU"
-    ],
+    "DAX 40": "dax",
+    "S&P 500": "sp500",
+    "Nasdaq 100": "nasdaq100",
 }
 
 PRESET_STRATEGIES = {
@@ -56,6 +46,18 @@ PRESET_STRATEGIES = {
         "desc": "MACD-Linie hat die Signallinie von unten gekreuzt.",
         "filters": {"macd_bullish": True}
     },
+    " TTM Squeeze Pro Fired": {
+        "desc": "Squeeze wurde in den letzten 2 Tagen beendet, Ausbruch nach oben (Momentum positiv).",
+        "filters": {"ttm_squeeze_fired": True}
+    },
+    "◆ In Squeeze (Kompression)": {
+        "desc": "Bollinger Bänder liegen innerhalb der Keltner Kanäle — Volatilität wird komprimiert.",
+        "filters": {"ttm_is_sqz": True}
+    },
+    " Donchian Breakout (20 Tage)": {
+        "desc": "Schlusskurs hat das höchste Hoch der letzten 20 Tage überschritten.",
+        "filters": {"donchian_breakout": True}
+    },
     "◆ Günstige Bewertung (KGV < 15)": {
         "desc": "Niedrig bewertete Aktien mit KGV unter 15.",
         "filters": {"pe_max": 15}
@@ -78,6 +80,9 @@ CUSTOM_FORMULA_VARS = {
     "MarketCap": "Marktkapitalisierung (in €/$ absolut)",
     "Pct52wHigh": "Abstand vom 52-Wochen-Hoch (in %)",
     "Volume": "Handelsvolumen (letzter Tag)",
+    "TTM_Squeeze": "Squeeze-Ausbruch (Fired) nach oben (True/False)",
+    "TTM_In_Squeeze": "Aktuell im Squeeze (True/False)",
+    "Donchian_Break": "Donchian 20-Tage Breakout (True/False)",
 }
 
 
@@ -92,39 +97,137 @@ def screen_ticker(sym: str) -> dict | None:
     try:
         t = yf.Ticker(sym)
         fi = t.fast_info
-        info = t.info
+        
+        # yfinance info can be unreliable and raise TypeErrors internally
+        try:
+            info = t.info
+        except Exception:
+            info = {}
+            
+        if info is None:
+            info = {}
 
-        price = getattr(fi, "last_price", None)
+        price = getattr(fi, "last_price", None) if fi else None
         sma20 = sma50 = rsi = macd_val = macd_sig = volume = None
         pct_from_high = None
+        ttm_fired = False
+        ttm_is_sqz = False
+        donchian_break = False
+        ret_12m = None  # 12-Monats-Rendite für RS-Rating
 
-        df = yf.download(sym, period="90d", interval="1d",
+        # 12-Monats-Daten für RS-Rating (252 Handelstage)
+        df = yf.download(sym, period="252d", interval="1d",
                          auto_adjust=True, progress=False)
         if not df.empty:
             if isinstance(df.columns, pd.MultiIndex):
+                # Flache Spalten, falls MultiIndex (Passiert oft bei neueren yfinance-Versionen)
                 df.columns = df.columns.get_level_values(0)
-            close = df["Close"].squeeze()
+            
+            # Falls durch das Flachen Duplikate entstanden sind (z.B. zwei Close-Spalten), 
+            # nehmen wir nur die erste.
+            df = df.loc[:, ~df.columns.duplicated()]
+
+            # Sicherstellen, dass wir Series erhalten, keine DataFrames
+            def get_s(name, fallback=None):
+                if name in df.columns:
+                    s = df[name]
+                    return s.iloc[:, 0] if isinstance(s, pd.DataFrame) else s
+                return fallback
+
+            close = get_s("Close")
+            if close is None:
+                # Letzter Ausweg: Erste verfügbare Spalte
+                close = df.iloc[:, 0]
+            
+            high = get_s("High", fallback=close)
+            low = get_s("Low", fallback=close)
+
             if len(close) >= 50:
-                sma20 = float(close.rolling(20).mean().iloc[-1])
-                sma50 = float(close.rolling(50).mean().iloc[-1])
+                sma20 = float(close.rolling(20).mean().ffill().iloc[-1])
+                sma50 = float(close.rolling(50).mean().ffill().iloc[-1])
+            # RS-Rating: 12-Monats-Rendite (oder so viel wie verfügbar)
+            if len(close) >= 2:
+                close_f = close.ffill().dropna()
+                ret_12m = float((close_f.iloc[-1] / close_f.iloc[0]) - 1) * 100
             if len(close) >= 14:
                 delta = close.diff()
-                gain = delta.clip(lower=0).rolling(14).mean()
-                loss = (-delta.clip(upper=0)).rolling(14).mean()
-                rs = gain / loss.replace(0, float("nan"))
-                rsi = float(100 - (100 / (1 + rs.iloc[-1])))
+                gain = delta.clip(lower=0)
+                loss = (-delta.clip(upper=0))
+                # Wilder's Smoothing (EWM) - Konsistent mit backtesting.py
+                avg_gain = gain.ewm(alpha=1/14, min_periods=14).mean()
+                avg_loss = loss.ewm(alpha=1/14, min_periods=14).mean()
+                rs = avg_gain / avg_loss.replace(0, float("nan"))
+                rsi_series = 100 - (100 / (1 + rs))
+                rsi = float(rsi_series.ffill().iloc[-1])
             if len(close) >= 26:
                 ema12 = close.ewm(span=12).mean()
                 ema26 = close.ewm(span=26).mean()
                 macd_line = ema12 - ema26
                 sig_line = macd_line.ewm(span=9).mean()
-                macd_val = float(macd_line.iloc[-1])
-                macd_sig = float(sig_line.iloc[-1])
+                macd_val = float(macd_line.ffill().iloc[-1])
+                macd_sig = float(sig_line.ffill().iloc[-1])
                 if len(macd_line) >= 2:
+                    macd_line_f = macd_line.ffill()
+                    sig_line_f = sig_line.ffill()
                     macd_cross_bull = bool(
-                        (macd_line.iloc[-2] < sig_line.iloc[-2]) and (macd_val > macd_sig))
-            if "Volume" in df.columns:
-                volume = float(df["Volume"].iloc[-1])
+                        (macd_line_f.iloc[-2] < sig_line_f.iloc[-2]) and (macd_val > macd_sig))
+            vol_s = get_s("Volume")
+            if vol_s is not None:
+                volume = float(vol_s.ffill().iloc[-1])
+
+            # --- NEU: Donchian Breakout (20 Tage) ---
+            if len(close) >= 21:
+                highest_high = close.rolling(20).max().shift(1)
+                # Prüfen, ob der heutige Kurs (oder der letzte verfügbare) das 20-Tage-Hoch gebrochen hat
+                highest_high_f = highest_high.ffill()
+                close_f = close.ffill()
+                if not pd.isna(highest_high_f.iloc[-1]):
+                    donchian_break = bool(close_f.iloc[-1] > highest_high_f.iloc[-1])
+
+            # --- NEU: TTM Squeeze Pro (vereinfacht für Screener-Signal) ---
+            if len(close) >= 20:
+                length = 20
+                basis = close.rolling(length).mean()
+                dev = 2.0 * close.rolling(length).std(ddof=0)
+                bb_upper = basis + dev
+                bb_lower = basis - dev
+
+                tr1 = high - low
+                tr2 = (high - close.shift(1)).abs()
+                tr3 = (low - close.shift(1)).abs()
+                tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+                dev_kc = tr.rolling(length).mean()
+                    
+                kc_upper_low = basis + dev_kc * 1.5
+                kc_lower_low = basis - dev_kc * 1.5
+
+                # Squeeze is 'on' when Bollinger Bands are INSIDE Keltner Channels
+                sqz_on = (bb_lower > kc_lower_low) & (bb_upper < kc_upper_low)
+                
+                # Fired: transition from Squeeze-On to Squeeze-Off (release of volatility)
+                # We check the last 2 bars for the transition to be more sensitive.
+                sqz_fired_series = (sqz_on.shift(1) == True) & (sqz_on == False)
+                
+                highest = high.rolling(length).max()
+                lowest = low.rolling(length).min()
+                avg_hl_basis = ((highest + lowest) / 2 + basis) / 2
+                val = close - avg_hl_basis
+
+                x_diff = np.arange(length) - (length - 1) / 2
+                sum_x2 = length * (length**2 - 1) / 12
+                weights = (1.0 / length) + (x_diff / sum_x2) * ((length - 1) / 2)
+                mom = val.rolling(length).apply(lambda y: np.dot(y, weights), raw=True)
+
+                # Results for the latest bars
+                if not pd.isna(sqz_on.iloc[-1]):
+                    ttm_is_sqz = bool(sqz_on.iloc[-1])
+                
+                # Check last 2 days for "Fired" signal
+                if len(sqz_fired_series) >= 2:
+                    recent_fired = sqz_fired_series.iloc[-2:].any()
+                    last_mom = mom.iloc[-1]
+                    if not pd.isna(recent_fired) and not pd.isna(last_mom):
+                        ttm_fired = bool(recent_fired and last_mom > 0)
 
         w52_high = info.get("fiftyTwoWeekHigh")
         if price and w52_high and w52_high > 0:
@@ -135,12 +238,16 @@ def screen_ticker(sym: str) -> dict | None:
             "price": price, "sma20": sma20, "sma50": sma50, "rsi": rsi,
             "macd_val": macd_val, "macd_sig": macd_sig,
             "macd_cross_bull": macd_cross_bull,
+            "ttm_fired": ttm_fired,
+            "ttm_is_sqz": ttm_is_sqz,
+            "donchian_break": donchian_break,
             "pe": info.get("trailingPE"), "market_cap": info.get("marketCap"),
             "pct_from_52high": pct_from_high, "w52_high": w52_high,
             "volume": volume,
+            "ret_12m": ret_12m,  # Für RS-Rating Post-Processing
         }
-    except (ValueError, KeyError, AttributeError, requests.RequestException) as e:
-        logger.warning(f"Screener-Fehler für {sym}: {e}")
+    except Exception as e:
+        logger.warning(f"Screener-Fehler für {sym}: {type(e).__name__}: {e}")
         return None
 
 
@@ -189,6 +296,15 @@ def apply_filters(results: list, filters: dict) -> list:
             mc = r.get("market_cap")
             if mc is None or mc < filters["mcap_min"]:
                 continue
+        if filters.get("ttm_squeeze_fired"):
+            if not r.get("ttm_fired"):
+                continue
+        if filters.get("ttm_is_sqz"):
+            if not r.get("ttm_is_sqz"):
+                continue
+        if filters.get("donchian_breakout"):
+            if not r.get("donchian_break"):
+                continue
         out.append(r)
     return out
 
@@ -210,16 +326,20 @@ def apply_custom_formula(results: list, formula: str) -> tuple[list, str | None]
             continue
         # Variablen-Mapping
         ns = {
-            "Close": r.get("price") or 0,
-            "SMA20": r.get("sma20") or 0,
-            "SMA50": r.get("sma50") or 0,
-            "RSI": r.get("rsi") or 0,
-            "MACD": r.get("macd_val") or 0,
-            "Signal": r.get("macd_sig") or 0,
-            "PE": r.get("pe") or 0,
-            "MarketCap": r.get("market_cap") or 0,
-            "Pct52wHigh": r.get("pct_from_52high") or 0,
-            "Volume": r.get("volume") or 0,
+            "Close": r.get("price") or 0.0,
+            "SMA20": r.get("sma20") or 0.0,
+            "SMA50": r.get("sma50") or 0.0,
+            "RSI": r.get("rsi") or 0.0,
+            "MACD": r.get("macd_val") or 0.0,
+            "Signal": r.get("macd_sig") or 0.0,
+            "PE": r.get("pe") or 0.0,
+            "MarketCap": r.get("market_cap") or 0.0,
+            "Pct52wHigh": r.get("pct_from_52high") or 0.0,
+            "Volume": r.get("volume") or 0.0,
+            "TTM_Squeeze": r.get("ttm_fired") or False,      
+            "TTM_In_Squeeze": r.get("ttm_is_sqz") or False,
+            "Donchian_Break": r.get("donchian_break") or False,
+            "nan": float("nan"), "inf": float("inf"),
             # Erlaubte Python-Builtins
             "abs": abs, "min": min, "max": max,
         }
@@ -247,9 +367,12 @@ def display_screener():
     st.markdown("## Aktien-Screener")
 
     # --- Universum ---
-    st.markdown("#### 1️⃣ Universum")
+    st.markdown("####  Universum")
     bookmarks = load_bookmarks()
     universe_options = list(INDEX_UNIVERSES.keys())
+    # Neue vollständige Universen hinzufügen
+    # (Nicht mehr nötig, da oben bereits als Full definiert, wir lassen die Logik aber robust)
+    
     if bookmarks:
         universe_options = ["★ Meine Watchlist"] + universe_options
     universe_options.append("Eigene Ticker")
@@ -270,17 +393,22 @@ def display_screener():
                                      placeholder="z.B. AAPL, SAP.DE, MSFT, BMW.DE")
         tickers_to_screen = [t.strip().upper() for t in custom_input.split(",") if t.strip()]
     else:
-        tickers_to_screen = INDEX_UNIVERSES[selected_universe].copy()
+        # Generischer Fallback: get_full_universe() für alle registrierten Indizes
+        tickers_to_screen = get_full_universe(selected_universe)
+        if not tickers_to_screen:
+            st.warning(f"Keine Ticker für '{selected_universe}' gefunden.")
+            return
 
     if combine_with_watchlist:
         tickers_to_screen = list(set(tickers_to_screen + list(bookmarks.keys())))
+    
     if not tickers_to_screen:
         st.info("Bitte ein Universum wählen oder Ticker eingeben.")
         return
-    st.caption(f"{len(tickers_to_screen)} Aktien im Universum")
+    st.caption(f"{len(tickers_to_screen)} Aktien im Universum geladen")
 
     # --- Filter ---
-    st.markdown("#### 2️⃣ Strategie / Filter")
+    st.markdown("####  Strategie / Filter")
     filter_mode = st.radio("Modus", ["Vordefinierte Strategie", "Manuelle Filter", "Custom Formula"],
                            horizontal=True)
     active_filters = {}
@@ -320,6 +448,18 @@ def display_screener():
                 active_filters["macd_bullish"] = True
             if st.checkbox("Nahe 52W-Hoch (< 5 % entfernt)"):
                 active_filters["near_52w_high"] = True
+            
+        st.markdown("**Spezial-Filter (TTM & Donchian)**")
+        sc1, sc2, sc3 = st.columns(3)
+        with sc1:
+            if st.checkbox("TTM Squeeze Fired (Breakout)", help="Squeeze-Ausbruch in den letzten 2 Tagen."):
+                active_filters["ttm_squeeze_fired"] = True
+        with sc2:
+            if st.checkbox("Aktuell im Squeeze", help="Volatilitäts-Kompression (BB innerhalb KC)."):
+                active_filters["ttm_is_sqz"] = True
+        with sc3:
+            if st.checkbox("Donchian Breakout (20T)"):
+                active_filters["donchian_breakout"] = True
 
         st.markdown("**Fundamentale Filter**")
         fc1, fc2, _fc3 = st.columns(3)
@@ -338,7 +478,7 @@ def display_screener():
 
     else:  # Custom Formula (Phase 2: TradingView-Stil)
         st.markdown("#### Custom Formula Builder")
-        with st.expander("📖 Verfügbare Variablen & Syntax", expanded=True):
+        with st.expander(" Verfügbare Variablen & Syntax", expanded=True):
             cols = st.columns(2)
             vars_list = list(CUSTOM_FORMULA_VARS.items())
             half = len(vars_list) // 2
@@ -370,7 +510,7 @@ MarketCap > 1000000000 and RSI < 50
             st.info("Gib eine Formel ein, um den Custom Screener zu nutzen.")
 
     # --- Scan ---
-    st.markdown("#### 3️⃣ Scan")
+    st.markdown("####  Scan")
     can_run = (
         (filter_mode != "Custom Formula" and active_filters) or
         (filter_mode == "Custom Formula" and custom_formula.strip())
@@ -391,10 +531,25 @@ MarketCap > 1000000000 and RSI < 50
                                    text=f"Analysiert: {i+1}/{len(tickers_to_screen)}")
         progress.empty()
 
+        # RS-Rating: Percentil-Rang der 12M-Rendite im Universum (Item #9)
+        all_ret12m = [r["ret_12m"] for r in raw_results if r and r.get("ret_12m") is not None]
+        if all_ret12m:
+            ret_arr = np.array(all_ret12m)
+            ret_sorted = np.sort(ret_arr)
+            for r in raw_results:
+                if r and r.get("ret_12m") is not None:
+                    r["rs_rating"] = int(np.searchsorted(ret_sorted, r["ret_12m"]) / len(ret_arr) * 99)
+                elif r:
+                    r["rs_rating"] = None
+
+
+        # Item #4: Ticker-Liste persistieren
+        st.session_state["screener_last_tickers"] = tickers_to_screen
+
         if filter_mode == "Custom Formula":
             matches, formula_error = apply_custom_formula(raw_results, custom_formula)
             if formula_error:
-                st.error(f"⚠ {formula_error}")
+                st.error(f" {formula_error}")
                 st.session_state["screener_results"] = []
             else:
                 st.session_state["screener_results"] = matches
@@ -412,14 +567,18 @@ MarketCap > 1000000000 and RSI < 50
         if not matches:
             st.warning("Keine Aktien gefunden, die alle Filter erfüllen.")
             return
-        st.success(f"✓ **{len(matches)} Treffer** von {total_scanned} gescannten Aktien")
+        st.success(f"**{len(matches)} Treffer** von {total_scanned} gescannten Aktien")
         rows = []
         for r in sorted(matches, key=lambda x: x.get("rsi") or 999):
             rsi_v = r.get("rsi")
+            rs = r.get("rs_rating")
             rows.append({
                 "Ticker": r["ticker"], "Name": r["name"],
                 "Kurs": f"{r['price']:.2f}" if r.get("price") else "—",
+                "RS-Rating": f"{rs}" if rs is not None else "—",
                 "RSI (14)": f"{rsi_v:.1f}" if rsi_v else "—",
+                "TTM Squeeze": "Fired!" if r.get("ttm_fired") else ("In Squeeze" if r.get("ttm_is_sqz") else "—"),
+                "Donchian Brk": "Signal" if r.get("donchian_break") else "—",
                 "SMA20": f"{r['sma20']:.2f}" if r.get("sma20") else "—",
                 "SMA50": f"{r['sma50']:.2f}" if r.get("sma50") else "—",
                 "MACD": f"{r['macd_val']:.3f}" if r.get("macd_val") else "—",
@@ -436,7 +595,15 @@ MarketCap > 1000000000 and RSI < 50
                            "screener_ergebnisse.csv", "text/csv")
 
         st.markdown("---")
-        st.markdown("**Treffer direkt analysieren:**")
+        st.markdown("**Analyse & Backtest:**")
+        
+        # New: Jump to Backtesting button
+        if st.button("Ergebnisse im Backtest prüfen", use_container_width=True):
+            st.session_state["bt_universe_mode"] = True
+            st.session_state["bt_universe_choice"] = "Screener Ergebnisse"
+            st.session_state["bt_run_immediately"] = True
+            st.switch_page("pages/3_Backtesting.py")
+            
         ticker_buttons = [r["ticker"] for r in matches]
         cols = st.columns(min(len(ticker_buttons), 6))
         for i, sym in enumerate(ticker_buttons[:12]):
