@@ -130,7 +130,7 @@ def generate_pdf_report(
         if chart_fig is not None:
             png_bytes = _export_plotly_to_png(chart_fig, width=680, height=260)
             if png_bytes:
-                section_header("📈 Kurschart")
+                section_header(" Kurschart")
                 with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
                     tmp.write(png_bytes)
                     tmp_path = tmp.name
@@ -143,7 +143,7 @@ def generate_pdf_report(
         # ── 3. Fundamentaldaten ───────────────────────────────────────────────
         kpis = fund_data.get("kpis", {})
         if kpis:
-            section_header("📊 Fundamentale Kennzahlen")
+            section_header(" Fundamentale Kennzahlen")
             items = list(kpis.items())
             # Zweispaltige Tabelle
             half = (len(items) + 1) // 2
@@ -182,7 +182,7 @@ def generate_pdf_report(
         # Analysten-Konsens
         analyst = fund_data.get("analyst", {})
         if analyst:
-            section_header("🎯 Analysten-Konsens")
+            section_header(" Analysten-Konsens")
             pdf.set_font("Helvetica", "", 9)
             pdf.set_text_color(50, 50, 60)
             rec = analyst.get("Empfehlung", "—")
@@ -195,7 +195,7 @@ def generate_pdf_report(
 
         # ── 4. Backtesting-Ergebnisse ─────────────────────────────────────────
         if bt_metrics:
-            section_header("⚡ Backtesting-Ergebnisse")
+            section_header(" Backtesting-Ergebnisse")
             bt_items = [
                 ("Net Profit", f"${bt_metrics.get('net_profit', 0):+,.2f} ({bt_metrics.get('net_profit_pct', 0):+.1f}%)"),
                 ("Max Drawdown", f"{bt_metrics.get('max_drawdown', 0):.1f}%"),
@@ -210,7 +210,7 @@ def generate_pdf_report(
 
         # ── 5. KI-Analyse ─────────────────────────────────────────────────────
         if ai_summary and ai_summary.strip():
-            section_header("🤖 KI-Analyse (Gemini)")
+            section_header(" KI-Analyse (Gemini)")
             # Markdown-Symbole vereinfachen
             clean_text = (ai_summary
                           .replace("**", "")
@@ -263,7 +263,7 @@ def display_pdf_export(ticker: str, company_name: str,
     """Zeigt den PDF-Export-Button in der Analyse-Ansicht."""
     ok, err = _check_dependencies()
 
-    with st.expander("📄 PDF-Report exportieren"):
+    with st.expander(" PDF-Report exportieren"):
         if not ok:
             st.warning(f"PDF-Export nicht verfügbar: {err}")
             st.code("pip install fpdf2 kaleido", language="bash")
@@ -275,6 +275,7 @@ def display_pdf_export(ticker: str, company_name: str,
         st.markdown("- Backtesting-Ergebnisse (wenn vorhanden)")
         st.markdown("- KI-Analyse (wenn Gemini-Key gesetzt)")
 
+        # PDF generieren Button
         if st.button("PDF generieren", type="primary", key=f"gen_pdf_{ticker}"):
             with st.spinner("PDF wird erstellt…"):
                 pdf_bytes = generate_pdf_report(
@@ -286,11 +287,17 @@ def display_pdf_export(ticker: str, company_name: str,
                     bt_metrics=bt_metrics,
                 )
             if pdf_bytes:
-                filename = f"aktien_report_{ticker}_{datetime.now().strftime('%Y%m%d')}.pdf"
-                st.download_button(
-                    label=f"⬇ {filename} herunterladen",
-                    data=pdf_bytes,
-                    file_name=filename,
-                    mime="application/pdf",
-                )
-                st.success("✓ PDF erfolgreich erstellt!")
+                st.session_state[f"pdf_data_{ticker}"] = pdf_bytes
+                st.success("✓ PDF erfolgreich erstellt! Klicke unten auf Download.")
+
+        # Download-Button anzeigen, wenn PDF-Daten im Session-State existieren
+        if f"pdf_data_{ticker}" in st.session_state:
+            pdf_bytes = st.session_state[f"pdf_data_{ticker}"]
+            filename = f"aktien_report_{ticker}_{datetime.now().strftime('%Y%m%d')}.pdf"
+            st.download_button(
+                label=f" {filename} herunterladen",
+                data=pdf_bytes,
+                file_name=filename,
+                mime="application/pdf",
+                key=f"dl_pdf_{ticker}"
+            )
