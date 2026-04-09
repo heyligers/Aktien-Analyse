@@ -143,5 +143,6 @@ Oder dauerhaft speichern in `.streamlit/secrets.toml`: `GEMINI_KEY = "dein-key"`
             st.error(f"Fehler: {result['error']}")
         elif result["content"]:
             st.markdown(result["content"])
+            st.session_state[f"ai_summary_{ticker_sym}"] = result["content"]
         else:
             st.warning("Keine Antwort erhalten.")
