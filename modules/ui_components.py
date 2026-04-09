@@ -4,6 +4,8 @@
 
 import streamlit as st
 import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 import yfinance as yf
 from datetime import datetime, timedelta
 
@@ -11,7 +13,8 @@ from modules.utils import fmt_number, logger
 from modules.data_api import (
     get_full_ticker_data, get_fundamentals, get_options_data, get_macro_context,
     calculate_risk_metrics, calculate_correlation_matrix,
-    get_insider_data, get_reddit_posts, get_heatmap_data, get_economic_calendar
+    get_insider_data, get_reddit_posts, get_heatmap_data, get_economic_calendar,
+    get_index_ticker_data
 )
 from modules.bookmarks import load_portfolio, add_portfolio_position, remove_portfolio_position
 from modules.news_api import sentiment_score
@@ -382,38 +385,122 @@ def display_correlation_heatmap(corr_df: pd.DataFrame):
 
 def display_heatmap_tab(index_universes: dict):
     st.markdown("### Sektor-Heatmap")
-    universe_choice = st.selectbox("Index wählen", list(index_universes.keys()), key="heatmap_idx")
+
+    hm_col1, hm_col2, hm_col3 = st.columns([2, 1, 1])
+    with hm_col1:
+        universe_choice = st.selectbox("Index wählen", list(index_universes.keys()), key="heatmap_idx")
+    with hm_col2:
+        heatmap_view = st.radio("Ansicht", [" Grid", " Treemap"], horizontal=True, key="heatmap_view")
+    with hm_col3:
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button(" Cache leeren", key="clear_hm_cache",
+                     help="Sektordaten und Preise neu laden"):
+            from modules.data_api import _get_bulk_prices, _get_ticker_meta_heatmap_cached
+            _get_bulk_prices.clear()
+            _get_ticker_meta_heatmap_cached.clear()
+            st.session_state["heatmap_loaded"] = False
+            st.success("Cache geleert! Bitte Heatmap neu laden.")
+            st.rerun()
+
     if st.button("Heatmap laden", type="primary", key="load_heatmap") or \
        st.session_state.get("heatmap_loaded"):
         st.session_state["heatmap_loaded"] = True
-        data = get_heatmap_data(universe_choice, index_universes)
+
+        # 1. Ticker-Liste ermitteln
+        from modules.index_utils import get_full_universe
+        tickers = get_full_universe(universe_choice)
+        if not tickers:
+            tickers = index_universes.get(universe_choice, [])
+
+        # 2. Daten laden mit Progress Bar
+        progress_container = st.empty()
+        def _update_progress(val, text):
+            progress_container.progress(val / 100, text=text)
+
+        data = get_heatmap_data(universe_choice, tickers, progress_cb=_update_progress)
+        progress_container.empty()
         if not data:
             st.warning("Keine Daten verfügbar.")
             return
-        data.sort(key=lambda x: (x['sector'], -abs(x['change'])))
-        cells = ""
-        for d in data:
-            ch = d['change']
-            if ch > 2: bg = "#1b5e20"
-            elif ch > 1: bg = "#2e7d32"
-            elif ch > 0: bg = "#388e3c"
-            elif ch > -1: bg = "#c62828"
-            elif ch > -2: bg = "#b71c1c"
-            else: bg = "#880e0e"
-            arrow = "▲" if ch > 0 else "▼" if ch < 0 else "●"
-            mcap_label = fmt_number(d['mcap'], large=True)
-            cells += f"""<div style="background:{bg};border-radius:6px;padding:8px;
-                text-align:center;cursor:pointer;min-width:90px;transition:transform 0.15s;"
-                onmouseover="this.style.transform='scale(1.05)'"
-                onmouseout="this.style.transform='scale(1)'">
-                <div style="font-weight:bold;font-size:0.85rem;color:white;">{d['ticker']}</div>
-                <div style="font-size:0.7rem;color:rgba(255,255,255,0.8);">{d['name'][:15]}</div>
-                <div style="font-size:1rem;font-weight:bold;color:white;margin:4px 0;">{arrow} {ch:+.2f}%</div>
-                <div style="font-size:0.65rem;color:rgba(255,255,255,0.6);">{mcap_label}</div>
-            </div>"""
-        html = f"""<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));
-            gap:6px;padding:8px;">{cells}</div>"""
-        st.markdown(html, unsafe_allow_html=True)
+        # -- Ansicht: Treemap oder Grid --
+        use_treemap = "Treemap" in heatmap_view
+
+        if use_treemap:
+            # === ITEM #10: TREEMAP-HEATMAP ===
+            df_hm = pd.DataFrame(data)
+            df_hm["mcap_safe"] = df_hm["mcap"].fillna(1e8).clip(lower=1e7)
+            df_hm["sector"] = df_hm["sector"].fillna("Sonstiges")
+            df_hm["label"] = df_hm["ticker"] + "<br>" + df_hm["change"].map(lambda x: f"{x:+.2f}%")
+
+            fig_tree = px.treemap(
+                df_hm,
+                path=["sector", "ticker"],
+                values="mcap_safe",
+                color="change",
+                color_continuous_scale=[(0.0, "#880e0e"), (0.3, "#c62828"),
+                                        (0.5, "#1e2230"),
+                                        (0.7, "#2e7d32"), (1.0, "#1b5e20")],
+                color_continuous_midpoint=0,
+                custom_data=["name", "change", "price", "mcap_safe"],
+                title=f"{universe_choice} — Treemap nach Marktkapitalisierung"
+            )
+            fig_tree.update_traces(
+                texttemplate="<b>%{label}</b><br>%{customdata[1]:+.2f}%",
+                hovertemplate=(
+                    "<b>%{label}</b><br>"
+                    "Change: %{customdata[1]:+.2f}%<br>"
+                    "Price: %{customdata[2]:.2f}<extra></extra>"
+                )
+            )
+            fig_tree.update_layout(
+                paper_bgcolor="#131722", font_color="#d1d4dc",
+                height=700, margin=dict(l=0, r=0, t=40, b=0),
+                coloraxis_showscale=False
+            )
+            st.plotly_chart(fig_tree, use_container_width=True)
+
+        else:
+            # === BESTEHENDE GRID-ANSICHT ===
+            from itertools import groupby
+            import textwrap
+
+            # WICHTIG: groupby() gruppiert nur aufeinanderfolgende gleiche Elemente.
+            # Deshalb MUSS vorher nach Sektor sortiert werden, sonst erscheint
+            # jeder Sektor mehrmals mit jeweils nur einer Aktie.
+            data.sort(key=lambda x: (str(x.get('sector', 'Sonstiges')), -(x.get('mcap') or 0)))
+
+            for sector, group in groupby(data, key=lambda x: str(x.get('sector', 'Sonstiges'))):
+                group_list = list(group)
+                header_html = textwrap.dedent(f"""
+                    <div style="margin-top:20px; margin-bottom:10px; font-weight:bold;
+                         border-bottom:1px solid #444; color:#00d4ff; padding:4px; font-size:1.1rem;">
+                        {sector} <span style="font-size:0.8rem; color:#888; font-weight:normal;">({len(group_list)} Titel)</span>
+                    </div>
+                    <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(130px, 1fr)); gap:8px; padding:4px;">
+                """).strip()
+                cells_html = ""
+                for d in group_list:
+                    ch = d.get('change', 0)
+                    if ch > 2: bg = "#1b5e20"
+                    elif ch > 1: bg = "#2e7d32"
+                    elif ch > 0: bg = "#388e3c"
+                    elif ch > -1: bg = "#c62828"
+                    elif ch > -2: bg = "#b71c1c"
+                    else: bg = "#880e0e"
+                    arrow = "▲" if ch > 0 else "▼" if ch < 0 else "●"
+                    mcap_label = fmt_number(d.get('mcap', 0), large=True)
+                    cells_html += textwrap.dedent(f"""
+                        <div style="background:{bg}; border-radius:6px; padding:10px;
+                            text-align:center; min-width:110px;
+                            box-shadow: 2px 2px 6px rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1);">
+                            <div style="font-weight:bold; font-size:0.85rem; color:white; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{d.get('ticker', '—')}</div>
+                            <div style="font-size:0.65rem; color:rgba(255,255,255,0.8); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; margin-bottom:4px;">{d.get('name', '—')[:15]}</div>
+                            <div style="font-size:1rem; font-weight:bold; color:white; margin:2px 0;">{arrow} {ch:+.2f}%</div>
+                            <div style="font-size:0.6rem; color:rgba(255,255,255,0.6);">{mcap_label}</div>
+                        </div>
+                    """).strip()
+                st.markdown(header_html + cells_html + "</div>", unsafe_allow_html=True)
+
         total = len(data)
         up = sum(1 for d in data if d['change'] > 0)
         down = total - up
@@ -481,6 +568,10 @@ def display_economic_calendar():
 def display_insider(ticker_sym: str):
     st.markdown("#### Insider-Transaktionen")
     st.caption("Daten von OpenInsider.com — nur US-Aktien · Letzte 90 Tage")
+    
+    if "." in ticker_sym and not ticker_sym.endswith(".US"):
+        st.info("Hinweis: OpenInsider unterstützt nur US-Aktien. Es wird das Basis-Symbol gesucht.")
+        
     txns = get_insider_data(ticker_sym)
     if not txns:
         st.info("Keine Insider-Transaktionen gefunden.")
@@ -502,12 +593,12 @@ def display_insider(ticker_sym: str):
 # SOCIAL SENTIMENT
 # ============================================================================
 
-def display_social_sentiment(ticker_sym: str, lang: str):
+def display_social_sentiment(ticker_sym: str, company_name: str, lang: str):
     st.markdown("#### Social Sentiment")
     st.caption("Reddit: r/wallstreetbets · r/stocks · r/investing")
-    posts = get_reddit_posts(ticker_sym)
+    posts = get_reddit_posts(ticker_sym, company_name)
     if not posts:
-        st.info(f"Keine Reddit-Posts zu `{ticker_sym}` gefunden.")
+        st.info(f"Keine Reddit-Posts zu `{ticker_sym}` oder `{company_name}` gefunden.")
         return
     try:
         from nltk.sentiment.vader import SentimentIntensityAnalyzer
@@ -529,3 +620,57 @@ def display_social_sentiment(ticker_sym: str, lang: str):
         st.markdown(f"""{s_emoji} **[{p['title'][:80]}]({p['url']})**
 <span style="font-size:0.75rem;color:#888;">r/{p['subreddit']} · ↑ {p['score']} · {p['comments']} Komm. · {age_str}</span>""",
                     unsafe_allow_html=True)
+
+
+def display_stock_ticker():
+    """Zeigt einen scrollenden Börsen-Ticker im N24/WELT-Stil."""
+    data = get_index_ticker_data()
+    if not data:
+        return
+
+    # Erzeuge HTML für die Ticker-Items
+    ticker_items = ""
+    for d in data:
+        color = "#26a69a" if d["change"] >= 0 else "#ef5350"
+        arrow = "▲" if d["change"] >= 0 else "▼"
+        price_fmt = f"{d['price']:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        ticker_items += f'<div class="ticker-item"><span class="ticker-name">{d["name"]}</span><span class="ticker-price">{price_fmt}</span><span class="ticker-change" style="color: {color};">{arrow} {abs(d["change"]):.2f}%</span></div>'
+
+    # CSS für das Ticker-Design
+    ticker_css = """<style>
+.ticker-wrap {
+    width: 100%;
+    overflow: hidden;
+    background: #131722;
+    padding: 10px 0;
+    border-bottom: 1px solid #2a2e39;
+    margin-bottom: 20px;
+    white-space: nowrap;
+}
+.ticker-move {
+    display: inline-flex;
+    white-space: nowrap;
+    animation: ticker-scroll 100s linear infinite;
+}
+.ticker-move:hover {
+    animation-play-state: paused;
+}
+.ticker-item {
+    display: inline-block;
+    padding: 0 40px;
+    font-family: 'Inter', sans-serif;
+    font-weight: 500;
+    font-size: 1.1rem;
+    flex-shrink: 0;
+}
+.ticker-name { color: #d1d4dc; margin-right: 8px; }
+.ticker-price { color: #ffffff; font-weight: bold; margin-right: 8px; }
+
+@keyframes ticker-scroll {
+    0% { transform: translateX(0); }
+    100% { transform: translateX(-50%); }
+}
+</style>"""
+
+    ticker_html = f'{ticker_css}<div class="ticker-wrap"><div class="ticker-move">{ticker_items}{ticker_items}</div></div>'
+    st.markdown(ticker_html, unsafe_allow_html=True)
