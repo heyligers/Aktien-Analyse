@@ -208,7 +208,7 @@ def build_lwc_html(df, sma_on, ema_on, bb_on, vwap_on,
   #chart_area {{ position:relative; flex-shrink:0; }}
   #main_panel {{ width:100%; height:520px; }}
   #draw_canvas {{ position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:none; z-index:5; }}
-  #draw_canvas.drawing {{ pointer-events:auto; cursor:crosshair; }}
+  #draw_canvas.drawing {{ cursor:crosshair; }}
   #vol_panel {{ width:100%; height:100px; border-top:1px solid #2a2a3a; }}
   .legend {{ position:absolute; top:6px; left:8px; z-index:10; color:#d1d4dc; font-size:12px; pointer-events:none; }}
   #crosshair_info {{ padding:4px 8px; background:rgba(19,23,34,0.85); border-radius:4px; display:inline-block; }}
@@ -227,7 +227,7 @@ def build_lwc_html(df, sma_on, ema_on, bb_on, vwap_on,
     <button class="tb" data-tool="text" title="Text">T</button>
     <button class="tb" data-tool="pitchfork" title="Pitchfork">⑂</button>
     <div class="tsep"></div>
-    <button class="tb" data-tool="ruler" title="Lineal / Messung">↔</button>
+    <button class="tb" data-tool="ruler" title="Lineal / Messung">📏</button>
     <div class="tsep"></div>
     <button class="tb" id="btn_undo" title="Letzte löschen">↺</button>
     <button class="tb" id="btn_clear" title="Alle löschen">×</button>
@@ -323,6 +323,7 @@ function setTool(t) {{
   DS.tool = t; DS.pts = [];
   toolBtns.forEach(function(b){{ b.classList.toggle('active', b.getAttribute('data-tool')===t); }});
   DS.canvas.classList.toggle('drawing', t !== 'cursor');
+  document.getElementById('main_panel').style.cursor = t === 'cursor' ? 'default' : 'crosshair';
   var interact = t === 'cursor';
   mainChart.applyOptions({{ handleScroll: interact ? {{ mouseWheel:true, pressedMouseMove:true, horzTouchDrag:true, vertTouchDrag:true }} : false, handleScale: interact ? {{ mouseWheel:true, pinch:true, axisPressedMouseMove:{{ time:true, price:true }} }} : false }});
   var hints = {{ trendline:'Klick: Start → Ende', hline:'Klick: Preisniveau', rect:'Klick: Ecke 1 → 2', fib_draw:'Klick: Hoch → Tief', circle:'Klick: Ecke 1 → 2', text:'Klick: Position', pitchfork:'Klick: 3× Punkte', ruler:'Klick: Start → Ende' }};
@@ -366,19 +367,7 @@ mainChart.subscribeClick(function(param) {{
     renderAll(); updateCount();
   }}
 }});
-DS.canvas.addEventListener('mousemove', function(e) {{
-  if (DS.tool === 'cursor') return;
-  var rect = DS.canvas.getBoundingClientRect();
-  var x = e.clientX - rect.left; var y = e.clientY - rect.top;
-  DS.mp = y2p(y); DS.mx = x; DS.my = y;
-  var logical = mainChart.timeScale().coordinateToLogical(x);
-  if (logical !== null && candleDataArr.length > 0) {{
-    var idx = Math.max(0, Math.min(Math.round(logical), candleDataArr.length - 1));
-    DS.mt = candleDataArr[idx].time;
-  }}
-  if (DS.pts.length > 0) renderAll();
-  if (DS.tool === 'ruler' && DS.pts.length === 1) showRulerLive();
-}});
+
 function updateCount() {{ countEl.textContent = DS.drawings.length > 0 ? DS.drawings.length + ' Obj.' : ''; }}
 document.getElementById('btn_undo').addEventListener('click', undoDrawing);
 document.getElementById('btn_clear').addEventListener('click', function() {{ DS.drawings = []; DS.pts = []; rulerEl.style.display='none'; renderAll(); updateCount(); }});
@@ -480,7 +469,7 @@ function showRulerData(p1, p2, mx, my) {{
   }}
   var arrow = dp >= 0 ? '▲' : '▼';
   var col = dp >= 0 ? '#26a69a' : '#ef5350';
-  rulerEl.innerHTML = '<div style="color:'+col+';font-weight:bold;margin-bottom:3px;">'+arrow+' '+dp.toFixed(2)+' ('+dpPct.toFixed(2)+'%)</div><div>⏱ '+timeStr+' · '+bars+' Kerzen</div>';
+  rulerEl.innerHTML = '<div style="color:'+col+';font-weight:bold;margin-bottom:3px;">'+arrow+' '+dp.toFixed(2)+' ('+dpPct.toFixed(2)+'%)</div><div> '+timeStr+' · '+bars+' Kerzen</div>';
   rulerEl.style.display = 'block';
   rulerEl.style.left = Math.min(mx+15, DS.canvas.width-180)+'px';
   rulerEl.style.top = Math.max(my-50, 5)+'px';
