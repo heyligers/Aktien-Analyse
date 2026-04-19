@@ -426,36 +426,81 @@ def display_heatmap_tab(index_universes: dict):
         use_treemap = "Treemap" in heatmap_view
 
         if use_treemap:
-            # === ITEM #10: TREEMAP-HEATMAP ===
+            # === ITEM #10: TREEMAP-HEATMAP (Manual with go.Treemap) ===
             df_hm = pd.DataFrame(data)
             df_hm["mcap_safe"] = df_hm["mcap"].fillna(1e8).clip(lower=1e7)
             df_hm["sector"] = df_hm["sector"].fillna("Sonstiges")
-            df_hm["label"] = df_hm["ticker"] + "<br>" + df_hm["change"].map(lambda x: f"{x:+.2f}%")
+            df_hm["change"] = pd.to_numeric(df_hm["change"], errors='coerce').fillna(0.0)
+            df_hm["price"] = pd.to_numeric(df_hm["price"], errors='coerce').fillna(0.0)
 
-            fig_tree = px.treemap(
-                df_hm,
-                path=["sector", "ticker"],
-                values="mcap_safe",
-                color="change",
-                color_continuous_scale=[(0.0, "#880e0e"), (0.3, "#c62828"),
-                                        (0.5, "#1e2230"),
-                                        (0.7, "#2e7d32"), (1.0, "#1b5e20")],
-                color_continuous_midpoint=0,
-                custom_data=["name", "change", "price", "mcap_safe"],
-                title=f"{universe_choice} — Treemap nach Marktkapitalisierung"
-            )
-            fig_tree.update_traces(
-                texttemplate="<b>%{label}</b><br>%{customdata[1]:+.2f}%",
+            labels = []
+            parents = []
+            values = []
+            color_vals = []
+            custom_changes = []
+            custom_prices = []
+            
+            root_label = universe_choice
+            labels.append(root_label)
+            parents.append("")
+            
+            total_mcap = df_hm["mcap_safe"].sum()
+            values.append(total_mcap)
+            
+            root_change = (df_hm["change"] * df_hm["mcap_safe"]).sum() / total_mcap if total_mcap else 0.0
+            color_vals.append(root_change)
+            custom_changes.append(f"{root_change:+.2f}%".replace('.', ','))
+            custom_prices.append("—")
+            
+            for sector, grp in df_hm.groupby("sector"):
+                labels.append(sector)
+                parents.append(root_label)
+                sec_mcap = grp["mcap_safe"].sum()
+                values.append(sec_mcap)
+                
+                sec_chg = (grp["change"] * grp["mcap_safe"]).sum() / sec_mcap if sec_mcap else 0.0
+                color_vals.append(sec_chg)
+                custom_changes.append(f"{sec_chg:+.2f}%".replace('.', ','))
+                custom_prices.append("—")
+                
+                for _, row in grp.iterrows():
+                    # Ticker names need to be unique across the tree. If duplicate tickers exist, we could append sector.
+                    labels.append(row["ticker"])
+                    parents.append(sector)
+                    values.append(row["mcap_safe"])
+                    color_vals.append(row["change"])
+                    custom_changes.append(f"{row['change']:+.2f}%".replace('.', ','))
+                    p = row["price"]
+                    custom_prices.append(f"{p:.2f}".replace('.', ',') if p else "—")
+            
+            customdata = list(zip(custom_changes, custom_prices))
+            
+            fig_tree = go.Figure(go.Treemap(
+                labels=labels,
+                parents=parents,
+                values=values,
+                marker=dict(
+                    colors=color_vals,
+                    colorscale=[(0.0, "#880e0e"), (0.3, "#c62828"),
+                                (0.5, "#1e2230"),
+                                (0.7, "#2e7d32"), (1.0, "#1b5e20")],
+                    cmid=0,
+                    showscale=False
+                ),
+                customdata=customdata,
+                texttemplate="<b>%{label}</b><br>%{customdata[0]}",
                 hovertemplate=(
                     "<b>%{label}</b><br>"
-                    "Change: %{customdata[1]:+.2f}%<br>"
-                    "Price: %{customdata[2]:.2f}<extra></extra>"
-                )
-            )
+                    "Change: %{customdata[0]}<br>"
+                    "Price: %{customdata[1]}<extra></extra>"
+                ),
+                branchvalues="total"
+            ))
+            
             fig_tree.update_layout(
+                title=f"{universe_choice} — Treemap nach Marktkapitalisierung",
                 paper_bgcolor="#131722", font_color="#d1d4dc",
-                height=700, margin=dict(l=0, r=0, t=40, b=0),
-                coloraxis_showscale=False
+                height=700, margin=dict(l=0, r=0, t=40, b=0)
             )
             st.plotly_chart(fig_tree, use_container_width=True)
 
