@@ -115,7 +115,7 @@ try:
     else:
         with col_main:
             # Indikatoren-Toolbar (Platzsparend mit Popover)
-            with st.popover("📊 Indikatoren & Einstellungen", use_container_width=True):
+            with st.popover("Indikatoren & Einstellungen", use_container_width=True):
                 pop_col1, pop_col2, pop_col3 = st.columns(3)
                 with pop_col1:
                     st.markdown("**Trend/Overlay**")
