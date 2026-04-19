@@ -33,11 +33,9 @@ from modules.technical_analysis import (
     calculate_fibonacci, sr_fib_to_lwc_lines,
 )
 from modules.charting import build_lwc_html
-from modules.ai_gemini import display_ai_news
 from modules.ui_components import (
     display_fundamentals, display_options, display_macro,
-    display_comparison, display_insider, display_social_sentiment,
-    display_stock_ticker
+    display_comparison, display_stock_ticker
 )
 from modules.report_generator import display_pdf_export
 
@@ -219,8 +217,8 @@ try:
                 market_query = '"S&P 500" OR "Wall Street" OR "Federal Reserve"'
                 n_lang = "en"; y_reg = "US"; y_lang = "en-US"
 
-            tab_news, tab_market, tab_fund, tab_opt, tab_macro, tab_ai, tab_insider, tab_social = st.tabs([
-                "News", "Markt", "Fund.", "Opt.", "Makro", "KI", "Insider", "Social"
+            tab_news, tab_market, tab_fund, tab_opt, tab_macro = st.tabs([
+                "News", "Markt", "Fund.", "Opt.", "Makro"
             ])
 
             with tab_news:
@@ -272,27 +270,7 @@ try:
                     else:
                         st.info("Klicke zum Laden der Makro/Sektordaten.")
 
-            with tab_ai:
-                with st.container(height=780):
-                    display_ai_news(ticker, company_name, n_lang)
 
-            with tab_insider:
-                with st.container(height=780):
-                    if st.session_state.get(f"insider_loaded_{ticker}") or \
-                       st.button("Insider-Daten laden", type="primary", key="load_insider"):
-                        st.session_state[f"insider_loaded_{ticker}"] = True
-                        display_insider(ticker)
-                    else:
-                        st.info("Klicke zum Laden der Insider-Transaktionen.")
-
-            with tab_social:
-                with st.container(height=780):
-                    if st.session_state.get(f"social_loaded_{ticker}") or \
-                       st.button("Social Sentiment laden", type="primary", key="load_social"):
-                        st.session_state[f"social_loaded_{ticker}"] = True
-                        display_social_sentiment(ticker, company_name, n_lang)
-                    else:
-                        st.info("Klicke zum Laden von Reddit-Sentiment.")
 
         # ── PDF-Export (unterhalb Chart) ─────────────────────────────────────
         st.markdown("---")
