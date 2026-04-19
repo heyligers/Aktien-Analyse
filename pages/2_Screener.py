@@ -14,7 +14,6 @@ from modules.bookmarks import display_watchlist
 from modules.screener import display_screener
 from modules.ui_components import display_heatmap_tab, display_economic_calendar, display_stock_ticker
 from modules.screener import INDEX_UNIVERSES
-from modules.index_utils import display_constituents_update_ui
 
 # Sidebar
 st.sidebar.header("Navigation")
@@ -27,8 +26,8 @@ display_stock_ticker()
 display_watchlist()
 
 # Tabs
-tab_screener, tab_heatmap, tab_calendar, tab_update = st.tabs([
-    " Screener", " Sektor-Heatmap", " Wirtschaftskalender", " Daten aktualisieren"
+tab_screener, tab_heatmap, tab_calendar = st.tabs([
+    " Screener", " Sektor-Heatmap", " Wirtschaftskalender"
 ])
 
 with tab_screener:
@@ -40,5 +39,4 @@ with tab_heatmap:
 with tab_calendar:
     display_economic_calendar()
 
-with tab_update:
-    display_constituents_update_ui()
+
