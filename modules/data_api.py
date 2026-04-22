@@ -106,21 +106,42 @@ def get_fundamentals(ticker_sym: str) -> dict:
         "upgrades_downgrades": None
     }
     try:
-        result["kpis"] = {
-            "KGV (TTM)": fmt_number(info.get("trailingPE")),
-            "KGV (Forward)": fmt_number(info.get("forwardPE")),
-            "KBV": fmt_number(info.get("priceToBook")),
-            "EV/EBITDA": fmt_number(info.get("enterpriseToEbitda")),
-            "Marktkapitalisierung": fmt_number(info.get("marketCap"), large=True),
-            "Umsatz (TTM)": fmt_number(info.get("totalRevenue"), large=True),
-            "Gewinnmarge": fmt_number(info.get("profitMargins"), pct=True),
-            "ROE": fmt_number(info.get("returnOnEquity"), pct=True),
-            "Dividendenrendite": (f"{float(info['dividendYield']):.2f} %".replace(".", ",")
-                                  if info.get("dividendYield") is not None else "—"),
-            "Beta": fmt_number(info.get("beta")),
-            "52W Hoch": fmt_number(info.get("fiftyTwoWeekHigh")),
-            "52W Tief": fmt_number(info.get("fiftyTwoWeekLow")),
-        }
+        kpis = {}
+        # Versuche zuerst standard info kpis
+        if info:
+            kpis = {
+                "KGV (TTM)": fmt_number(info.get("trailingPE")),
+                "KGV (Forward)": fmt_number(info.get("forwardPE")),
+                "KBV": fmt_number(info.get("priceToBook")),
+                "EV/EBITDA": fmt_number(info.get("enterpriseToEbitda")),
+                "Marktkapitalisierung": fmt_number(info.get("marketCap"), large=True),
+                "Umsatz (TTM)": fmt_number(info.get("totalRevenue"), large=True),
+                "Gewinnmarge": fmt_number(info.get("profitMargins"), pct=True),
+                "ROE": fmt_number(info.get("returnOnEquity"), pct=True),
+                "Dividendenrendite": (f"{float(info['dividendYield']):.2f} %".replace(".", ",")
+                                      if info.get("dividendYield") is not None else "—"),
+                "Beta": fmt_number(info.get("beta")),
+                "52W Hoch": fmt_number(info.get("fiftyTwoWeekHigh")),
+                "52W Tief": fmt_number(info.get("fiftyTwoWeekLow")),
+            }
+        
+        # Fallback falls info leer ist (Streamlit Cloud Block) -> Nutze fast_info
+        if not info or not kpis.get("Marktkapitalisierung") or kpis.get("Marktkapitalisierung") == "—":
+            try:
+                t = yf.Ticker(ticker_sym)
+                fi = t.fast_info
+                kpis["Marktkapitalisierung"] = fmt_number(getattr(fi, "market_cap", None), large=True)
+                kpis["52W Hoch"] = fmt_number(getattr(fi, "year_high", None))
+                kpis["52W Tief"] = fmt_number(getattr(fi, "year_low", None))
+                kpis["Letzter Preis"] = fmt_number(getattr(fi, "last_price", None))
+                # Fülle Rest mit Strichen, da Yahoo API info blockiert
+                for key in ["KGV (TTM)", "KGV (Forward)", "KBV", "EV/EBITDA", "Umsatz (TTM)", "Gewinnmarge", "ROE", "Dividendenrendite", "Beta"]:
+                    if key not in kpis:
+                        kpis[key] = "—"
+            except Exception:
+                pass
+                
+        result["kpis"] = kpis
     except (TypeError, ValueError) as e:
         logger.warning(f"KPI-Formatierung fehlgeschlagen: {e}")
 
@@ -225,7 +246,7 @@ def get_macro_context(ticker_sym: str, market_proxy: str) -> dict:
         result["sector_name"] = sector
         result["sector_etf"] = sector_etf
 
-        end = datetime.today().date()
+        end = pd.Timestamp.now(tz="Europe/Berlin").date()
         start = end - timedelta(days=365)
         df_t = yf.download(ticker_sym, start=start, end=end, interval="1d",
                            auto_adjust=True, progress=False)
@@ -268,7 +289,7 @@ def get_macro_context(ticker_sym: str, market_proxy: str) -> dict:
 @st.cache_data(ttl=1800, show_spinner=False)
 def calculate_risk_metrics(tickers: list) -> dict:
     result = {}
-    end = datetime.today().date()
+    end = pd.Timestamp.now(tz="Europe/Berlin").date()
     start = end - timedelta(days=365)
     for sym in tickers:
         try:
@@ -305,7 +326,7 @@ def calculate_risk_metrics(tickers: list) -> dict:
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def calculate_correlation_matrix(tickers: list) -> pd.DataFrame:
-    end = datetime.today().date()
+    end = pd.Timestamp.now(tz="Europe/Berlin").date()
     start = end - timedelta(days=365)
     all_returns = {}
     for sym in tickers:
@@ -543,7 +564,7 @@ def get_economic_calendar() -> list:
         {"date": "2026-12-09", "event": "Fed Zinsentscheid", "region": "US", "importance": "!!!"},
         {"date": "2026-12-17", "event": "EZB Zinsentscheid", "region": "EU", "importance": "!!!"},
     ]
-    today = datetime.today().date()
+    today = pd.Timestamp.now(tz="Europe/Berlin").date()
     for ev in static_events:
         d = datetime.strptime(ev["date"], "%Y-%m-%d").date()
         if d >= today - timedelta(days=14):
