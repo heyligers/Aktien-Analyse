@@ -74,7 +74,7 @@ with col_header2:
     interval = intervals[sel_inter]
 
 with col_header3:
-    default_end = datetime.today().date()
+    default_end = pd.Timestamp.now(tz="Europe/Berlin").date()
     if interval == "1m":
         default_start = default_end - timedelta(days=6) # Max. 7 Tage für 1m
     elif interval == "15m":
@@ -223,7 +223,7 @@ try:
 
             with tab_news:
                 news_date = st.date_input("News-Datum", value=end_date,
-                                          max_value=datetime.today().date(),
+                                          max_value=pd.Timestamp.now(tz="Europe/Berlin").date(),
                                           key="news_date_input")
                 with st.container(height=720):
                     with st.spinner("News werden geladen…"):
