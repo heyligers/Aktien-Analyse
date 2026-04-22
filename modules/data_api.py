@@ -13,6 +13,26 @@ from datetime import datetime, timedelta
 
 from modules.utils import fmt_number, logger, safe_get
 
+# --- Streamlit Cloud / yfinance Workaround ---
+yf_session = requests.Session()
+yf_session.headers.update({
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+})
+
+_original_download = yf.download
+_original_ticker = yf.Ticker
+
+def _patched_download(*args, **kwargs):
+    kwargs.setdefault('session', yf_session)
+    return _original_download(*args, **kwargs)
+
+def _patched_ticker(*args, **kwargs):
+    kwargs.setdefault('session', yf_session)
+    return _original_ticker(*args, **kwargs)
+
+yf.download = _patched_download
+yf.Ticker = _patched_ticker
+# ---------------------------------------------
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_ticker(query):
@@ -27,7 +47,7 @@ def get_ticker(query):
         return query
 
 
-@st.cache_data(show_spinner="Daten werden geladen...")
+@st.cache_data(ttl=300, show_spinner="Daten werden geladen...")
 def load_data(ticker, start, end, interval):
     end_yf = end + timedelta(days=1)
     df = yf.download(ticker, start=start, end=end_yf, interval=interval, auto_adjust=False)
